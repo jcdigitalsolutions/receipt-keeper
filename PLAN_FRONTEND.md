@@ -1,109 +1,26 @@
-# Frontend workstream
+# Frontend workstream: return to simple receipt upload
+Implementation repo: `jcdigitalsolutions/receipt-keeper`. Read `PLAN.md` first. Reconfirm main. **Do not start destructive OCR removal until backend Gemma image smoke and integration contract pass.**
 
-Implementation repo:
-`Biddlebaddleboo/receipt-keeper`
+## Implementation scope / exact starting paths
+- `src/components/AddReceiptForm.tsx`: current extraction effect, OCR review inputs, `buildDecision`, `handleSubmit`. Preserve input/camera capture, `autoCropReceiptImage`, grayscale and `convertReceiptImageFile`.
+- `src/hooks/useReceiptApi.ts`: `ReceiptUploadMeta.frontend_extraction`, `createReceiptViaSignedUpload`, `finalizeUpload` and upload state/read model.
+- `src/lib/receiptFrontendExtractor.ts`, `receiptOcr.ts`, `receiptModernOcr.ts`, `receiptBandOcr.ts`, `receiptHierarchicalBandOcr.ts`, `receiptPpocrV6Extractor.ts`, model JSON and directly associated tests.
+- `package.json`, `package-lock.json`, `bun.lock`/`bun.lockb`, `scripts/`, `benchmarks/`, build/test configuration and `README.md`.
+- `src/components/prepaid/AddPrepaidPurchaseFlow.tsx`, `src/lib/prepaidImagePipeline.ts`, `src/hooks/usePrepaidApi.ts` are read-only dependencies unless a verified shared OCR dependency forces a minimally scoped edit.
 
-Start in:
-- `src/hooks/usePrepaidApi.ts`
-- `src/components/prepaid/AddPrepaidPurchaseFlow.tsx`
-- `src/components/prepaid/AddPrepaidPurchaseFlow.test.tsx`
-- `src/pages/PrepaidCards.tsx`
-- `src/pages/PrepaidCards.test.tsx`
+## Verified facts
+`AddReceiptForm.tsx` runs `extractReceiptFieldsFromImage` before upload, disables submission while local OCR runs, and offers use-AI-for-remaining/entire paths. Receipt upload already uses WebP conversion plus signed GCS upload -> finalize. Prepaid sales receipts use the same upload hook, but front/back/card extraction has separate backend routes and stale/manual-edit protections.
 
-## One-to-one receipt selection
+## Required changes
+1. Use the frontend state/UX preceding `94750f496b54` as a **reference**, never a hard reset: newer GST288, prepaid, auth, user settings, exports, editing and media lifecycle must survive.
+2. Replace local-OCR/review/remaining-field decision logic with simple capture -> optional crop/transform -> preview -> upload/finalize -> backend extraction state. Let user review/edit extracted data in existing receipt detail path. Preserve cancellation, image preview object URL cleanup, accessible progress and error states.
+3. Stop sending `frontend_extraction` once backend contract is ready; preserve other metadata such as `image_grayscale` and the result shape.
+4. Trace consumers/imports before removing Tesseract/PaddleOCR/browser OCR rules, JSON classifiers and training/benchmark infrastructure. Delete only files, scripts and dependencies that are provably exclusive to obsolete OCR experiments. Keep unrelated crop benchmarks, image converters, receipt date utilities and prepaid workflows. Update all lockfiles actually in use and docs.
+5. Never expose provider secrets, never implement a browser-side Google request, and avoid any new ML/provider abstraction. Preserve owner auth and existing Firestore read/write rules.
 
-In new-purchase card selectors:
-
-- exclude receipts selected by another card;
-- keep the current card's own selection visible;
-- clearing/changing a selection immediately releases the old receipt.
-
-Remove all wording saying an activation receipt may be shared.
-
-In `PrepaidCardDetailV2`:
-- exclude receipts assigned to other cards;
-- keep the current card's own receipt available.
-
-Backend remains authoritative if a race occurs.
-
-## Activation receipt controls
-
-For every persisted activation receipt provide:
-
-- View
-- Download
-- Replace photo
-- Delete photo
-- Delete activation receipt
-
-Delete receipt requires confirmation and refreshes the purchase state.
-
-Deleting its photo leaves the activation receipt relationship intact but displays it as having no photo.
-
-Replacing preserves the same receipt ID/link.
-
-## Card controls
-
-Add explicit `Delete card` separate from archive.
-
-Require destructive confirmation.
-
-After deletion:
-- close detail;
-- update purchase lists;
-- linked activation receipt remains as an unlinked receipt.
-
-## Card photo controls
-
-For each existing:
-
-- package image;
-- card front;
-- card back;
-- legacy opened-card image;
-
-provide:
-
-- View
-- Download
-- Replace
-- Delete photo
-
-Replacement uses the existing crop → conversion → upload pipeline.
-
-Package replacement may reuse existing package extraction controls.
-
-Front replacement automatically runs PAN/expiry extraction.
-
-Back replacement automatically runs CVV extraction.
-
-Preserve the current image-generation/manual-edit protection so replacement OCR cannot overwrite later manual edits.
-
-Legacy opened-card replacement only replaces that legacy media slot; do not infer front/back.
-
-## Failure behavior
-
-If replacement upload succeeds but API replacement fails, keep the existing persisted image displayed and surface the failure.
-
-If backend reports delayed old-image cleanup, the replacement/deletion still reflects durable record state; show a non-blocking cleanup warning if exposed by the API.
-
-Never locally remove a persisted card/receipt until the backend confirms the mutation.
-
-## Tests
-
-Add deterministic coverage for:
-
-- exclusive receipt selectors;
-- release on unlink;
-- delete activation receipt;
-- delete activation photo only;
-- replace activation photo;
-- delete card;
-- activation receipt surviving card deletion;
-- delete/replace package image;
-- delete/replace front image;
-- delete/replace back image;
-- delete/replace legacy image;
-- front/back OCR after replacement;
-- failed mutation leaves old UI state intact;
-- destructive confirmations.
+## Tests and acceptance
+- Update `src/components/AddReceiptForm.test.tsx` and receipt hook tests for one upload per action, file validation, crop/WebP preservation, upload cancellation/error/retry, no local OCR initialization, no `frontend_extraction`, and backend pending/error/success presentation.
+- Regression tests for receipt edit/persist, items/tax/date display, sales-receipt upload from prepaid flow, card front/back extraction/manual edit protection, image replacement, GST288/exports.
+- Run `npm test`, `npm run build`, and targeted browser suite if present. Examine final diff for dead OCR packages/models/benchmarks but do not remove unrelated functionality.
+- Handoff: files, tests, commit SHA, UX changes, intentional remnants and unresolved assumptions. Backend owner must merge/validate first; run e2e only after both workstreams integrate.
+- Non-goals: no Firestore migration, no aesthetic overhaul, no removal of auto-crop or grayscale by default, no modification to backend repository from this plan commit.
