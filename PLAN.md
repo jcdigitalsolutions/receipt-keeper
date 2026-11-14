@@ -1,49 +1,49 @@
-# Plan: Replace experimental receipt OCR with Gemma 4 31B
+# PLAN.md — Restore simple receipt JSON extraction using Ling 3.0 Flash VL via OpenRouter
 
-## Scope and checked baselines (2026-11-14)
-- Planning repo only: `jcdigitalsolutions/receipt-keeper`, `main@f449dd3c0bb7b99a2e91f9ff4ea7c7e0142a88a1`.
-- Downstream implementation repo (DO NOT modify while planning): `jcdigitalsolutions/ai-receipt-tracker-backend`, `main@c0f5cfdab0e1337de2d8a7ae243bcf7e00251b3e`.
-- Existing prepaid-media planning documents are superseded as planning handoff; current prepaid behavior is explicitly preserved. Re-read both remote heads before executing.
-- Objective: simplify sales-receipt OCR to one server-side Gemma image extraction request, using a Gemini API key securely injected from Google Secret Manager. Eliminate unnecessary browser Tesseract/PaddleOCR/ML and backend experimental prompt/field-splitting machinery, but preserve capture, image preparation, editing, data, authentication, billing, prepaid management, and AI read-access.
+## Decision and scope
+- This document **replaces and supersedes** the previous Gemma 4 / Google AI Studio plan and experimental local/browser OCR plans. Do **not** implement Gemma 4, Gemini API, Google Secret Manager key migration for that provider, Tesseract, PaddleOCR, rule-trained OCR selectors, or a multi-stage OCR pipeline.
+- Planning and handoff repository: `jcdigitalsolutions/receipt-keeper`. The separate implementation repository `jcdigitalsolutions/ai-receipt-tracker-backend` must be inspected during execution but **is not modified by this planning commit**.
+- Desired architecture: one receipt image upload, **one server-side multimodal extraction call** to **Ling 3.0 Flash VL via OpenRouter**, parse/validate **one JSON response**, and persist it using the existing receipt data contract. Restore the simpler pre-local-OCR receipt workflow **selectively**; never wholesale-revert unrelated commits.
+- Keep existing image capture, automatic cropping, orientation, image quality preparation, WebP conversion, GCS signed upload, Firebase Auth, Firestore schema and history, manual edits, categories, tax fields, billing, AI read access, and all unrelated features.
+- **Separate prepaid card flows must continue working** (including masking PAN/CVV); do not remove shared functionality needed for them merely because receipt OCR is being simplified.
 
-## STOP gate: smoke test FIRST, before any destructive change
-1. In backend, add a small bounded, opt-in smoke-test command/test that obtains credentials from the same Cloud Run Secret Manager binding intended for production (or an explicitly authenticated nonproduction binding). Never read/export the secret into a frontend artifact or print it.
-2. Verify the currently supported Google Gemini Developer API model ID, image MIME/payload format, multimodal availability, context limits, structured output support, and provider terms rather than assuming `gemma-4-31b-it` currently accepts images.
-3. Call model `gemma-4-31b-it` with a trivial text prompt (connectivity) and a non-sensitive, consented real receipt image via the actual intended `generateContent` API. Validate visual extraction of merchant/date/subtotal/tax/total/items, not just HTTP 200 or JSON syntax.
-4. Exercise invalid credentials and a mocked 429/5xx/bad JSON; record sanitized status, model/version, elapsed time and parse outcome, never raw receipt contents or key. Check how Cloud Run can access the GCS object and upload bytes/inline image appropriately; a signed URL alone may not be valid as image input for Google's API.
-5. Gate passes only if **real image understanding and parsing succeed**, correct secret binding is demonstrated, and quotas/terms are acceptable. If denied/unsupported/temporarily unavailable, STOP: preserve both OCR implementations and the working OpenAI path; report evidence and propose an alternative. Do not silently switch models or treat a successful text-only call as a pass.
-6. Never delete legacy OCR infrastructure until this gate passes. Keep smoke tests opt-in and safe for CI (mocked default; live test explicit).
+## Phase 0 — Inspect and prove the provider before removing anything
+1. Inspect the latest heads of both repos, current `PLAN_BACKEND.md` / `PLAN_FRONTEND.md`, and history before browser OCR was introduced (frontend commit `94750f496b54` and its parent are helpful references, not blanket rollback targets).
+2. Verify the **actual OpenRouter model slug** for Ling 3.0 Flash VL, endpoint availability, image input support, streaming/non-streaming handling, JSON-schema or JSON-mode capabilities, token accounting, provider routing, and current prices. Do not assume a slug or promotional price solely from this plan.
+3. Make a minimal, opt-in **live smoke test** against OpenRouter using a non-sensitive receipt image: prove that the model sees the image and returns extractable merchant/date/items/subtotal/tax/total **JSON**. A text-only test or HTTP 200 alone is insufficient. Test malformed JSON, provider 429/5xx, and credential failure using mocked cases.
+4. Use a server-only **OpenRouter API key**, through the backend's existing secure secret/configuration pattern; never put it in Vite/frontend variables or logs. Do not reuse the Google Gemini key. Verify OpenRouter provider/model content-handling terms before sending private receipts.
+5. **Hard stop:** If live image-to-JSON extraction cannot be verified, leave existing working OCR paths intact and report the blocker. No destructive cleanup until the smoke gate passes.
 
-## Verified repository facts
-- Frontend `src/components/AddReceiptForm.tsx` currently calls `extractReceiptFieldsFromImage` and offers trusted/remaining/entire decisions; it also uses `autoCropReceiptImage`, grayscale conversion and WebP conversion. These image preparations are independent of OCR.
-- `src/lib/receiptFrontendExtractor.ts` integrates local Tesseract recognition, rules, and optional model selectors. `package.json` lists `tesseract.js`, `@gutenye/ocr-browser`, `@gutenye/ocr-models`, `@paddleocr/paddleocr-js`; multiple scripts/benchmarks/model JSON files exist.
-- `src/hooks/useReceiptApi.ts` sends `frontend_extraction` through signed-upload/finalize and reads Firestore-backed receipt metadata.
-- Backend `cmd/apiserver/receipts.go` has normal `processReceiptJob` / `extractReceiptOCR` and alternate `processFrontendReceiptJob`, `validateFrontendExtraction`, `mergeFrontendOCR`, `extractReceiptOCRFields`. It currently uses OpenAI Responses API; `main.go` reads `OPENAI_API_KEY` and `OPENAI_MODEL_NAME`.
-- Existing backend persists Firestore receipt detail/shard summaries and GCS `storage_path`, with asynchronous extraction/error paths. Normal data reads and auth are not OCR infrastructure.
-- Prepaid side-specific card extraction is live in `src/components/prepaid/AddPrepaidPurchaseFlow.tsx` (`extractCardFront`/`extractCardBack`) and elsewhere. Preserve functionality and credential redaction; inspect provider dependencies before deciding whether to migrate those separate flows.
-- Relevant frontend history: `94750f496b54` introduced frontend extraction review; its parent is a useful reference for pre-browser-OCR UX. Later commits contain unrelated prepaid/auth changes and MUST NOT be wholesale reverted.
+## Phase 1 — Restore one authoritative backend JSON extraction path
+1. Reuse existing signed GCS image upload/finalize and asynchronous receipt job lifecycle. Backend fetches the uploaded image securely and sends image + concise extraction instructions to OpenRouter's vision-capable Ling model.
+2. Request structured JSON directly, retaining existing canonical field semantics (merchant/vendor, purchase date, invoice number if present, category, subtotal, tax, total, line items with quantity/unit/line price, raw extracted text if needed, and extracted fields). Use the repository's **actual persisted schema** as authoritative; do not invent a competing schema.
+3. Parse JSON safely and normalize to the existing receipt data model. Validate numeric types, currency, date, optional/null values, line-item arithmetic and subtotal/tax/total reconciliation where possible. Do not fabricate missing values or silently turn unknown into zero. Ignore prompt-injection instructions printed on receipts.
+4. Avoid second-pass LLMs, local OCR, text-recognition preflight, field-by-field calls, trained selectors, provider hedging or OCR fallbacks unless explicitly requested later. One model request per normal receipt; only bounded transient network retries when safe.
+5. Preserve authentication and ownership checks, Firestore detail/shard consistency, stale edit protection, duplicate-job/idempotency handling, recoverable failures, and GCS media cleanup. Never overwrite newer human corrections with late model results.
+6. Prefer concise extraction and JSON-only responses; ensure model thinking/reasoning can be minimized or disabled **only if the actual supported API permits it**. Record billable input, cached input, reasoning/output tokens and total API cost when available, without leaking receipt content.
+7. Respect existing backend secret management and deployment configuration. Document the exact model ID and required OpenRouter secret; do not hard-code unverified pricing.
 
-## Workstreams, interfaces, ownership, order
-1. **Backend provider and data path**: `PLAN_BACKEND.md`; owns API request, secret configuration, parsing, canonical receipt persistence, extraction failure semantics, backward-compatible finalize contract. Must complete smoke gate and backend integration tests first.
-2. **Frontend capture simplification**: `PLAN_FRONTEND.md`; owns UI, receipt upload payload, browser OCR dependencies/scripts/assets/tests. Runs after backend contract is validated. Can independently inventory removable frontend files and design tests, but may not cut over before backend gate.
-- Shared contract: frontend uploads WebP via existing signed-upload -> GCS -> finalize; backend is sole receipt OCR authority; existing `vendor, purchase_date, subtotal, tax, total, category, invoice_id, items, extracted_text, extracted_fields` names remain readable. No new client permissions or exposed secrets. Backend owns changes to request schema; frontend consumes it. Avoid concurrent edits of same repo/files.
-- Integration order: smoke -> backend model+safe persistence -> backend tests -> frontend removal+tests -> cross-repo integration -> deploy/monitor. Keep an easy rollback to prior working backend until real deployments pass.
+## Phase 2 — Remove obsolete receipt OCR experiments from the frontend
+1. Restore a simple add-receipt experience: capture/upload prepared image, finalize, wait for backend JSON extraction, display editable extracted fields. Remove frontend `frontend_extraction` payload and trusted/remaining/entire local-OCR decision workflow **where no longer needed**, coordinating any backend request compatibility changes first.
+2. Remove receipt-specific Tesseract/browser PaddleOCR/other local OCR dependencies, dynamic imports, workers, model downloads/assets, heuristics, selector ML, browser OCR runners, and experimental benchmark/train scripts **only after tracing references and confirming they are obsolete**.
+3. Candidate inventory: `src/lib/receiptFrontendExtractor.ts`, `src/components/AddReceiptForm.tsx`, `src/hooks/useReceiptApi.ts`, `package.json` dependencies such as `tesseract.js`, `@gutenye/ocr-browser`, `@gutenye/ocr-models`, `@paddleocr/paddleocr-js`, and receipt OCR benchmark artifacts. This is an inspection list, not an instruction to delete whole files.
+4. Keep image auto-crop, rotation/orientation correction, grayscale/contrast preparation when useful, WebP compression, preview, progress, retries, manual correction UI, unrelated receipt features, and shared libraries required by prepaid card extraction.
+5. Clean up obsolete docs, configuration and tests referring to the abandoned local/Gemma experiment. The older `PLAN_BACKEND.md` / `PLAN_FRONTEND.md` are **superseded by this PLAN.md**; update or remove stale handoffs during implementation so no contradictory plans remain.
 
-## Required invariants, security, failures
-- Preserve owner authorization, GCS `storage_path`, receipt IDs, sharded metadata/detail consistency, signed URL/media cleanup, current Firestore schema, old-record readability and manual-edit protection. No data migration or destructive resets.
-- Never replace newer user edits with late extraction results; consider job ID/image generation checks and duplicate finalize/worker execution. A failed extraction must surface a recoverable state and not silently appear successful. Preserve bounded HTTP/network timeouts and retry only safe transient errors (429/5xx with bounded backoff and Retry-After); distinguish limits from workflow lifespan. Do not log secrets, PAN/CVV, entire receipt images or model raw responses.
-- Preserve prepaid relationships, card image lifecycle, side-specific OCR and PAN/expiry/CVV masking; do not blindly delete shared conversion/crop libraries.
-- Input/output contract must treat null/unknown amounts and dates distinctly from zero, retain item quantity/price meaning, verify totals where defensible, validate category against configured options and resist prompt-injection instructions printed on receipts.
-- Google free-tier submitted-content/data-use terms and quota may be unsuitable for sensitive receipts: explicitly verify project tier and handling policy before live production data.
+## Execution order / workstreams
+1. **Backend workstream**: verify model, run live smoke, implement server-side OpenRouter Ling JSON extraction, mock tests, compatibility tests; provide stable frontend contract.
+2. **Frontend workstream**: inventory local OCR code independently, but do not remove paths until backend smoke and contract pass; then simplify receipt workflow and remove dead dependencies.
+3. **Integration**: test both repositories together, stage deployment safely, verify extraction end-to-end, and maintain an easy rollback to the last working deployed backend.
+4. Use existing Codex orchestration and subagent conventions. Keep workstreams isolated with no conflicting concurrent edits. No unrelated architecture rewrites.
 
-## Validation and release gate
-- Backend: `cd cmd/apiserver && go test ./...`; mock Google HTTP and GCS to cover good extraction, schema mismatch, missing secret, unauthorized user, 429 Retry-After, malformed output, cancellations, crash/retry, duplicate completion, stale edit and object cleanup. Live smoke test manual, redacted, opt-in.
-- Frontend: `npm test`, `npm run build`, and appropriate browser tests of upload, progress, cancellation, error/retry, manual edits, tax/line items, prepaid front/back.
-- Cross-repo: live receipt upload->processing->Firestore->UI, image replacement flow, historical reads, ID/auth boundaries, and failing provider behavior. Diff check: remove only obsolete OCR dependencies/assets/scripts; preserve crop, WebP, grayscale, GST288, billing, exports, prepaid, Firestore rules, AI access tokens and deployment configuration.
-- Do not announce migration complete until image smoke and e2e validation both pass. If smoke fails, STOP with no destructive deletion.
+## Acceptance criteria (all required)
+- A real consented receipt image passes through capture -> image preparation -> signed GCS upload -> backend OpenRouter Ling image call -> **valid canonical JSON** -> existing Firestore records -> editable UI.
+- Merchant/date, all visible line items, quantity, subtotal, taxes, discounts and total are returned when actually legible; missing fields stay null/unknown rather than fabricated. Both clear and difficult receipt samples are exercised.
+- No Tesseract, PaddleOCR, browser OCR worker, model download, local trained selector or other experimental OCR logic runs in normal sales-receipt processing; no obsolete OCR assets inflate the frontend bundle.
+- Failed/429/invalid JSON extraction is recoverable, bounded and visible; no false successful receipts, no stale writes or duplicates.
+- Security and owner isolation remain correct; API keys stay server-side, no private image or raw model response is logged; prepaid card scan/masking and unrelated app functions remain intact.
+- Run backend `go test ./...` in `cmd/apiserver` (plus targeted tests), frontend `npm test` and `npm run build`, provider smoke opt-in, and a real cross-repo end-to-end test. Report exact passing/failing tests, token usage and measured cost per receipt when available.
+- Deliver implementation commits with changed-file summary, verified model/provider, removed OCR footprint, deployment/rollback notes and any remaining blockers. **Do not claim complete until live smoke and end-to-end checks pass.**
 
-## Codex execution handoff
-1. Verify both latest remote `main` heads, reconcile architecture changes before modifying code, read this PLAN.md first.
-2. Assign PLAN_BACKEND.md and PLAN_FRONTEND.md as bounded owners; execute backend smoke gate before any cleanup and integrate backend before frontend cutover. Isolated branches/worktrees only where truly parallel-safe.
-3. Each executor reports changed files, commit SHA, validation, deviations and assumptions. Integrator runs cross-workstream tests and final-diff review.
-4. Codex should batch independent reads, compatible edits and validations efficiently; use installed `delayed-seq` wrapper for known consecutive shell commands without intermediate decisions. Avoid unnecessary repeated searches/model turns. Stop on failed tests, unknown contracts, unsafe content handling or unavailable model; never sacrifice correctness for batching.
+## Codex handoff
+Read this plan first. Inspect latest repo heads and reconcile drift. Implement the smallest robust design that returns backend-owned JSON from one Ling 3.0 Flash VL OpenRouter call. **Do not deploy or delete a functioning OCR path before the provider smoke gate passes.** This commit updates the plan only.
